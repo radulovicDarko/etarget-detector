@@ -5,6 +5,8 @@ import time
 import cv2
 import numpy as np
 
+import config as config_module
+
 try:
     import pygame
     pygame.mixer.init()
@@ -64,7 +66,7 @@ from config import (
     is_headless,
 )
 
-from core.ffmpeg_stream import FFmpegStream
+from core.camera import create_camera_stream
 from core.utils import FPSTimer, resize_to_fit
 from core.detector import LaserDetector
 from core.unity_sender import UnitySender
@@ -505,12 +507,10 @@ def project_paper_circle(h_paper_to_image, cx_mm, cy_mm, r_mm, n=96):
 
 
 def main():
-    stream = FFmpegStream(
-        ffmpeg_path=FFMPEG_PATH,
-        rtsp_url=RTSP_URL,
-        transport=RTSP_TRANSPORT,
-        scale=JPEG_SCALE
-    )
+    # Camera backend selection:
+    # - Raspberry Pi + picamera2 available => PiCamStream
+    # - otherwise fallback to RTSP/FFmpeg pipeline (dev workflow)
+    stream = create_camera_stream(config_module)
 
     detector = LaserDetector(
         lower_red_1=LOWER_RED_1,
@@ -661,18 +661,21 @@ def main():
     # be temporarily unavailable. Do not exit the process (which would trigger
     # systemd restarts); keep the HTTP control server alive and retry.
     RECONNECT_DELAY_S = 2.0
+    stream_open = False
 
     try:
         while True:
-            if stream.process is None:
+            if not stream_open:
                 if not stream.open():
-                    print("Ne mogu da otvorim FFmpeg JPEG stream. Retrying...")
+                    print("Ne mogu da otvorim camera stream. Retrying...")
                     time.sleep(RECONNECT_DELAY_S)
                     continue
+                stream_open = True
             ret, frame = stream.read()
             if not ret or frame is None:
                 print("Nema frame-a ili je stream prekinut. Reconnecting...")
                 stream.release()
+                stream_open = False
                 time.sleep(RECONNECT_DELAY_S)
                 continue
 

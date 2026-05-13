@@ -10,6 +10,10 @@
 Headless (bez monitora / systemd servis):
 - `SHOOTERRANGE_HEADLESS=1 python app.py`
 
+Kamera backend:
+- Raspberry Pi kamera (picamera2/libcamera): `SHOOTERRANGE_CAMERA_BACKEND=picam`
+- RTSP (dev workflow): `SHOOTERRANGE_CAMERA_BACKEND=rtsp` (koristi `RTSP_URL` iz `config.py`)
+
 ## Komande
 - q = izlaz
 - a = toggle auto-align
