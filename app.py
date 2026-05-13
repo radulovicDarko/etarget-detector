@@ -1,5 +1,6 @@
 import math
 import os
+import sys
 import time
 
 import cv2
@@ -507,6 +508,14 @@ def project_paper_circle(h_paper_to_image, cx_mm, cy_mm, r_mm, n=96):
 
 
 def main():
+    # systemd/journald often makes Python stdout block-buffered, which can
+    # look like "no logs" even though print() is being called.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
     headless = is_headless()
     print(f"Headless mode: {headless}")
 
