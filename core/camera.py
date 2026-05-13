@@ -16,7 +16,24 @@ just consumes ``frame`` ndarrays.
 """
 from __future__ import annotations
 
+import os
+import sys
 from typing import Any
+
+
+def _maybe_add_system_dist_packages() -> None:
+    """On Raspberry Pi OS, picamera2 is typically installed via apt into
+    /usr/lib/python3/dist-packages which is NOT visible inside a venv by
+    default. Add it opportunistically so CAMERA_BACKEND='auto' can detect
+    the Pi camera even when running under systemd with a venv.
+    """
+    candidates = [
+        "/usr/lib/python3/dist-packages",
+        "/usr/local/lib/python3/dist-packages",
+    ]
+    for p in candidates:
+        if p not in sys.path and os.path.isdir(p):
+            sys.path.append(p)
 
 
 def _picam_available() -> bool:
@@ -24,7 +41,11 @@ def _picam_available() -> bool:
     try:
         from picamera2 import Picamera2  # type: ignore
     except Exception:  # noqa: BLE001
-        return False
+        _maybe_add_system_dist_packages()
+        try:
+            from picamera2 import Picamera2  # type: ignore
+        except Exception:  # noqa: BLE001
+            return False
     try:
         cams = Picamera2.global_camera_info()  # type: ignore[attr-defined]
         return bool(cams)

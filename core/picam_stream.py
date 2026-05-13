@@ -12,6 +12,8 @@ will only fail when actually instantiated.
 """
 from __future__ import annotations
 
+import os
+import sys
 from typing import Optional, Tuple
 
 import numpy as np
@@ -25,12 +27,20 @@ class PiCamStream:
         try:
             from picamera2 import Picamera2  # type: ignore
         except Exception as e:  # noqa: BLE001
-            raise RuntimeError(
-                "picamera2 is not available — install it with "
-                "`sudo apt install python3-picamera2` on Raspberry Pi OS, "
-                "or set CAMERA_BACKEND='rtsp' in config.py to keep using the "
-                "FFmpeg/RTSP pipeline."
-            ) from e
+            # When running inside a venv, apt-installed picamera2 often lives
+            # in /usr/lib/python3/dist-packages which isn't on sys.path.
+            for p in ("/usr/lib/python3/dist-packages", "/usr/local/lib/python3/dist-packages"):
+                if p not in sys.path and os.path.isdir(p):
+                    sys.path.append(p)
+            try:
+                from picamera2 import Picamera2  # type: ignore
+            except Exception as e2:  # noqa: BLE001
+                raise RuntimeError(
+                    "picamera2 is not available — install it with "
+                    "`sudo apt install python3-picamera2` on Raspberry Pi OS, "
+                    "or set CAMERA_BACKEND='rtsp' in config.py to keep using the "
+                    "FFmpeg/RTSP pipeline."
+                ) from e2
         self._Picamera2 = Picamera2  # noqa: N806
         self.width = int(width)
         self.height = int(height)

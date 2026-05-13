@@ -24,6 +24,7 @@ def play_shoot():
     _SHOOT_CHANNEL.play(_SHOOT_SOUND)
 
 from config import (
+    is_headless,
     RTSP_URL,
     WINDOW_NAME,
     DISPLAY_MAX_WIDTH,
@@ -63,7 +64,9 @@ from config import (
     MJPEG_QUALITY,
 )
 
-from core.ffmpeg_stream import FFmpegStream
+import config as _config
+
+from core.camera import create_camera_stream
 from core.utils import FPSTimer, resize_to_fit
 from core.detector import LaserDetector
 from core.unity_sender import UnitySender
@@ -504,15 +507,12 @@ def project_paper_circle(h_paper_to_image, cx_mm, cy_mm, r_mm, n=96):
 
 
 def main():
-    stream = FFmpegStream(
-        ffmpeg_path=FFMPEG_PATH,
-        rtsp_url=RTSP_URL,
-        transport=RTSP_TRANSPORT,
-        scale=JPEG_SCALE
-    )
+    headless = is_headless()
+    print(f"Headless mode: {headless}")
 
+    stream = create_camera_stream(_config)
     if not stream.open():
-        print("Ne mogu da otvorim FFmpeg JPEG stream.")
+        print("Ne mogu da otvorim camera stream (picam/rtsp).")
         return
 
     detector = LaserDetector(
@@ -580,9 +580,9 @@ def main():
     _auto_samples: list[tuple] = []
     _auto_samples_target: int = 0
 
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
-
-    cv2.namedWindow("Laser Mask", cv2.WINDOW_AUTOSIZE)
+    if not headless:
+        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
+        cv2.namedWindow("Laser Mask", cv2.WINDOW_AUTOSIZE)
 
     # Mobile control server (HTTP API + MJPEG preview).
     control_state = None
@@ -655,7 +655,8 @@ def main():
     print(f"Calibration enabled: {CALIBRATION_ENABLED}")
     if CALIBRATION_ENABLED:
         print(f"Target ROI: ({TARGET_X1}, {TARGET_Y1}) -> ({TARGET_X2}, {TARGET_Y2})")
-    print("Press 'q' to quit.")
+    if not headless:
+        print("Press 'q' to quit.")
 
     try:
         while True:
@@ -1195,14 +1196,19 @@ def main():
             cv2.putText(frame, hud_txt, (20, frame_h - 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, hud_color, 1, cv2.LINE_AA)
 
-            display_frame = resize_to_fit(frame, DISPLAY_MAX_WIDTH, DISPLAY_MAX_HEIGHT)
-            display_mask = resize_to_fit(mask, 600, 400)
+            # Only compute resized display buffers when we actually need them.
+            want_preview = control_state is not None and control_state.preview_wanted()
+            display_frame = None
+            if not headless or want_preview:
+                display_frame = resize_to_fit(frame, DISPLAY_MAX_WIDTH, DISPLAY_MAX_HEIGHT)
 
-            cv2.imshow(WINDOW_NAME, display_frame)
-            cv2.imshow("Laser Mask", display_mask)
+            if not headless:
+                display_mask = resize_to_fit(mask, 600, 400)
+                cv2.imshow(WINDOW_NAME, display_frame)
+                cv2.imshow("Laser Mask", display_mask)
 
             # Push the annotated frame to the mobile preview stream.
-            if control_state is not None:
+            if control_state is not None and want_preview and display_frame is not None:
                 ok_jpg, jpg_buf = cv2.imencode(
                     ".jpg",
                     display_frame,
@@ -1210,6 +1216,9 @@ def main():
                 )
                 if ok_jpg:
                     control_state.push_frame(jpg_buf.tobytes())
+
+            if headless:
+                continue
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
