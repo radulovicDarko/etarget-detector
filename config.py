@@ -63,11 +63,24 @@ FFMPEG_PATH = _shutil.which("ffmpeg") or "ffmpeg"
 RTSP_TRANSPORT = "udp"
 JPEG_SCALE = "960:-1"
 
+# HSV color ranges for laser dot detection.
+# Red wraps around hue 0/180 → uses two ranges that get OR-ed together.
+# Tune these for your specific laser + camera combo. Use the test script
+# in README to print the actual HSV value the camera sees.
+#
+# RED_1/RED_2  = traditional 650 nm red laser (e.g. cheap pointers)
+# PURPLE/BLUE  = bright laser dots that overexpose CM3's sensor and read
+#                as violet/blue around the saturated white core.
 LOWER_RED_1 = (0, 120, 120)
 UPPER_RED_1 = (10, 255, 255)
 
 LOWER_RED_2 = (163, 120, 120)
 UPPER_RED_2 = (179, 255, 255)
+
+# Purple / violet (laser core that overexposed the sensor → halo reads
+# as deep blue-violet). Empirically hue 110-145 covers most CM3 cases.
+LOWER_PURPLE = (110, 80, 100)
+UPPER_PURPLE = (145, 255, 255)
 
 MIN_AREA = 2
 MAX_AREA = 5000

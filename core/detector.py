@@ -13,11 +13,22 @@ class LaserDetector:
         min_area=2,
         max_area=120,
         shot_cooldown_ms=120,
+        # Optional third HSV range — used for purple/violet "halos" that
+        # appear when a bright red/green laser overexposes the CSI sensor.
+        # Pass None on both to disable the third mask.
+        lower_extra=None,
+        upper_extra=None,
     ):
         self.lower_red_1 = np.array(lower_red_1, dtype=np.uint8)
         self.upper_red_1 = np.array(upper_red_1, dtype=np.uint8)
         self.lower_red_2 = np.array(lower_red_2, dtype=np.uint8)
         self.upper_red_2 = np.array(upper_red_2, dtype=np.uint8)
+        self.lower_extra = (
+            np.array(lower_extra, dtype=np.uint8) if lower_extra is not None else None
+        )
+        self.upper_extra = (
+            np.array(upper_extra, dtype=np.uint8) if upper_extra is not None else None
+        )
 
         self.min_area = min_area
         self.max_area = max_area
@@ -33,6 +44,9 @@ class LaserDetector:
         mask1 = cv2.inRange(hsv, self.lower_red_1, self.upper_red_1)
         mask2 = cv2.inRange(hsv, self.lower_red_2, self.upper_red_2)
         mask = cv2.bitwise_or(mask1, mask2)
+        if self.lower_extra is not None and self.upper_extra is not None:
+            mask3 = cv2.inRange(hsv, self.lower_extra, self.upper_extra)
+            mask = cv2.bitwise_or(mask, mask3)
 
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, self.kernel)
