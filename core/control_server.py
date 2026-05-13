@@ -1,20 +1,24 @@
 """HTTP + WebSocket control server consumed by the React Native mobile app.
 
+The Pi is intentionally a thin sensor: it detects laser hits and broadcasts
+them live, plus exposes calibration tools and a camera preview. It does NOT
+store sessions or hits — that responsibility lives on the mobile app and a
+remote backend. This keeps the Pi tiny, free of SQLite churn, and avoids
+turning it into yet another database to back up.
+
 Endpoints:
 
   GET  /api/health                       -> {status, version, uptime_s}
   POST /api/pair                         -> {token, device_name, device_id}
   GET  /api/target/config                -> target geometry (mm)
-  POST /api/session/start                -> {session_id, started_at}
-  POST /api/session/{id}/end             -> end summary
-  POST /api/session/{id}/reset           -> 204
-  GET  /api/session/{id}                 -> full session
-  GET  /api/sessions                     -> list
   GET  /api/stream/preview.mjpeg         -> multipart MJPEG (browser/VLC)
   GET  /api/stream/preview.jpg           -> single JPEG snapshot (mobile poll)
   POST /api/calibration/freeze           -> queue freeze (== keypress 'n')
   POST /api/calibration/unfreeze         -> queue unfreeze
-  GET  /ws/hits                          -> WebSocket; pushes hit/reset/session_*
+  GET  /api/calibration/tweaks           -> current operator tweaks
+  POST /api/calibration/tweaks           -> update operator tweaks
+  POST /api/calibration/auto             -> reset tweaks + sample N frames
+  GET  /ws/hits                          -> WebSocket; pushes hit + calibration
                                             messages matching the mobile schema
 
 Implementation notes:
@@ -35,12 +39,8 @@ import queue
 import struct
 import threading
 import time
-import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, urlsplit
-
-from .session_store import SessionStore
 
 
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -60,10 +60,6 @@ class ControlState:
 
         self._req_lock = threading.Lock()
         self._freeze_request: Optional[bool] = None  # True=freeze, False=unfreeze
-
-        self._sessions_lock = threading.RLock()
-        # Persistent SQLite-backed session storage. Survives Pi restarts.
-        self.sessions = SessionStore()
 
         self._subs_lock = threading.Lock()
         self._subscribers: List["queue.Queue[str]"] = []
@@ -182,79 +178,58 @@ class ControlState:
         text = json.dumps(message)
         with self._subs_lock:
             subs = list(self._subscribers)
+        n_dropped = 0
         for q in subs:
             try:
                 q.put_nowait(text)
             except queue.Full:
-                # Slow client — drop oldest by draining one.
+                # Slow client — drop oldest by draining one. We log this
+                # because a full queue means the WS client (mobile app) is
+                # consuming hits slower than we produce them, which is the
+                # most common cause of "hits feel laggy" reports.
+                n_dropped += 1
                 try:
                     q.get_nowait()
                     q.put_nowait(text)
                 except Exception:
                     pass
+        if n_dropped > 0 and message.get("type") == "hit":
+            print(
+                f"[ws] WARNING: {n_dropped}/{len(subs)} subscribers were "
+                f"full — slow consumer dropping older hits"
+            )
 
     # ---- sessions ----
-    def start_session(
-        self,
-        shooter_id: str,
-        discipline: str,
-        shots_per_target: Optional[int],
-        targets_per_session: Optional[int],
-    ) -> Dict[str, Any]:
-        res = self.sessions.start_session(
-            shooter_id=shooter_id,
-            discipline=discipline,
-            shots_per_target=shots_per_target,
-            targets_per_session=targets_per_session,
-        )
-        self._broadcast({
-            "type": "session_started",
-            "session_id": res["session_id"],
-            "started_at": res["started_at"],
-        })
-        return res
-
-    def end_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        summary = self.sessions.end_session(session_id)
-        if summary is None:
-            return None
-        self._broadcast({"type": "session_ended", "summary": summary})
-        return summary
-
-    def reset_session(self, session_id: str) -> bool:
-        if not self.sessions.reset_session(session_id):
-            return False
-        self._broadcast({"type": "reset"})
-        return True
-
-    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        return self.sessions.get_session(session_id)
-
-    def list_sessions(
-        self,
-        shooter_id: Optional[str] = None,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> Dict[str, Any]:
-        return self.sessions.list_sessions(shooter_id=shooter_id, limit=limit, offset=offset)
+    # Pi is stateless wrt sessions — it just streams hits. The mobile app
+    # owns the session lifecycle and persistence (locally for guests, to a
+    # remote backend for logged-in users). The WS message includes a fixed
+    # session_id="live" placeholder so the existing mobile schemas keep
+    # accepting it; the mobile WS handler rewrites it to the locally active
+    # session id before storing.
 
     def publish_hit(self, hit: Dict[str, Any]) -> None:
-        """Append a hit to the active session and broadcast it.
+        """Broadcast a fresh hit to all WebSocket subscribers.
 
         ``hit`` should already contain x_norm, y_norm, score, ring, x_mm,
-        y_mm, dist_mm, is_inner_ten. ``ts`` and ``session_id`` are added here.
+        y_mm, dist_mm, is_inner_ten. ``ts`` and a placeholder session_id
+        are added here.
         """
         ts = time.time()
-        session_id = self.sessions.get_active_id()
-        if session_id is not None:
-            try:
-                self.sessions.append_hit(session_id, ts, hit)
-            except Exception as e:  # noqa: BLE001
-                print(f"[control_server] failed to persist hit: {e}")
-        else:
-            session_id = "pending"
-        message = {"type": "hit", "session_id": session_id, "ts": ts, **hit}
+        message = {
+            "type": "hit",
+            "session_id": "live",
+            "ts": ts,
+            **hit,
+        }
+        t0 = time.time()
         self._broadcast(message)
+        t_broadcast_ms = (time.time() - t0) * 1000.0
+        n_subs = self.subscriber_count()
+        print(
+            f"[hit] ts={ts:.3f} score={hit.get('score')} ring={hit.get('ring')} "
+            f"dist={hit.get('dist_mm', 0.0):.1f}mm "
+            f"subs={n_subs} broadcast={t_broadcast_ms:.1f}ms"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -359,30 +334,6 @@ class _ControlHandler(BaseHTTPRequestHandler):
         if path == "/api/target/config":
             self._json(200, self.state.target_config)
             return
-        if path == "/api/sessions":
-            qs = parse_qs(urlsplit(self.path).query)
-            shooter_id = qs.get("shooter_id", [None])[0]
-            try:
-                limit = max(1, min(500, int(qs.get("limit", [50])[0])))
-            except (ValueError, TypeError):
-                limit = 50
-            try:
-                offset = max(0, int(qs.get("offset", [0])[0]))
-            except (ValueError, TypeError):
-                offset = 0
-            self._json(200, self.state.list_sessions(
-                shooter_id=shooter_id, limit=limit, offset=offset,
-            ))
-            return
-        if path.startswith("/api/session/"):
-            rest = path[len("/api/session/"):]
-            if rest and "/" not in rest:
-                s = self.state.get_session(rest)
-                if s is None:
-                    self._json(404, {"error": "session_not_found", "id": rest})
-                    return
-                self._json(200, s)
-                return
         if path == "/api/stream/preview.mjpeg":
             self._stream_mjpeg()
             return
@@ -459,78 +410,6 @@ class _ControlHandler(BaseHTTPRequestHandler):
                 return
             self._json(200, getter())
             return
-        if path == "/api/session/start":
-            body = self._read_json()
-            res = self.state.start_session(
-                shooter_id=str(body.get("shooter_id", "anonymous")),
-                discipline=str(body.get("discipline", "unknown")),
-                shots_per_target=body.get("shots_per_target"),
-                targets_per_session=body.get("targets_per_session"),
-            )
-            self._json(200, res)
-            return
-        if path.startswith("/api/session/"):
-            rest = path[len("/api/session/"):]
-            if rest.endswith("/hit"):
-                # Inject a synthetic hit into the active session. Used by the
-                # mobile "Demo" discipline so a fake shot persists to
-                # sessions.db and shows up in History exactly like a real
-                # laser-detected shot. The server is the source of truth, so
-                # it both stores AND broadcasts via WS — the same UI code
-                # path that draws real hits also draws these.
-                sid = rest[:-len("/hit")]
-                body = self._read_json()
-                # Validate against the same shape SessionStore.append_hit
-                # expects. We coerce/clamp so a bad client can't poison the
-                # database with NaNs or bogus rings.
-                try:
-                    ring = max(0, min(10, int(body.get("ring", 0))))
-                    score = max(0, min(10, int(body.get("score", ring))))
-                    hit = {
-                        "x_norm": float(body.get("x_norm", 0.5)),
-                        "y_norm": float(body.get("y_norm", 0.5)),
-                        "score": score,
-                        "ring": ring,
-                        "x_mm": float(body.get("x_mm", 0.0)),
-                        "y_mm": float(body.get("y_mm", 0.0)),
-                        "dist_mm": float(max(0.0, body.get("dist_mm", 0.0))),
-                        "is_inner_ten": bool(body.get("is_inner_ten", False)),
-                    }
-                except (TypeError, ValueError) as e:
-                    self._json(400, {"error": "invalid_hit", "detail": str(e)})
-                    return
-                # The active session is whatever was started last — that's
-                # the one the mobile app is showing. If nothing is active
-                # the hit is broadcast with session_id="pending" but not
-                # persisted (mirrors publish_hit's contract).
-                active_id = self.state.sessions.get_active_id()
-                if active_id is not None and active_id != sid:
-                    self._json(409, {
-                        "error": "session_not_active",
-                        "active_id": active_id,
-                        "requested_id": sid,
-                    })
-                    return
-                self.state.publish_hit(hit)
-                self._json(200, {"ok": True, "session_id": sid})
-                return
-            if rest.endswith("/end"):
-                sid = rest[:-len("/end")]
-                summary = self.state.end_session(sid)
-                if summary is None:
-                    self._json(404, {"error": "session_not_found", "id": sid})
-                    return
-                self._json(200, summary)
-                return
-            if rest.endswith("/reset"):
-                sid = rest[:-len("/reset")]
-                if not self.state.reset_session(sid):
-                    self._json(404, {"error": "session_not_found", "id": sid})
-                    return
-                self.send_response(204)
-                self._cors()
-                self.end_headers()
-                return
         self._json(404, {"error": "not_found", "path": path})
 
     # ---- snapshot + MJPEG ----
