@@ -30,6 +30,12 @@ Implementation notes:
 - The cv2 main loop pushes JPEGs via ``state.push_frame``, publishes hits via
   ``state.publish_hit``, and consumes pending freeze requests via
   ``state.consume_freeze_request``.
+
+Attachment policy:
+- Exactly one mobile device can be attached over WebSocket at a time.
+- A second device attempting to connect receives HTTP 409 (already_attached).
+- Detach happens on clean WS close, or automatically after a heartbeat timeout
+    if the client disappears without closing the socket.
 """
 from __future__ import annotations
 
@@ -66,10 +72,19 @@ class ControlState:
         self._subs_lock = threading.Lock()
         self._subscribers: List["queue.Queue[str]"] = []
 
-        # WebSocket ownership: at most one active WS client at a time.
-        # When a new client connects, older clients are asked to disconnect.
-        self._ws_owner_lock = threading.Lock()
-        self._ws_owner_generation = 0
+        # ---- WebSocket attachment (single-client) ----
+        # The Range supports exactly one attached mobile client at a time.
+        # We keep this purely in-memory: a small lock + a few scalars.
+        #
+        # New WS connections are rejected (HTTP 409) while a client is
+        # attached. If the attached client stops sending heartbeats (ping),
+        # we consider it stale and allow a new attach.
+        self._ws_attach_lock = threading.Lock()
+        self._ws_attached = False
+        self._ws_token = 0
+        self._ws_peer: Optional[str] = None
+        self._ws_last_seen = 0.0
+        self._ws_timeout_s = 45.0
 
         # ---- reliable hit delivery ----
         # Every published hit gets a monotonic seq number. The mobile app
@@ -223,15 +238,53 @@ class ControlState:
             self._subscribers.append(q)
         return q
 
-    def claim_ws_ownership(self) -> int:
-        """Return a new generation id for the currently connecting WS client."""
-        with self._ws_owner_lock:
-            self._ws_owner_generation += 1
-            return self._ws_owner_generation
+    def try_attach_ws(self, peer: str) -> Optional[int]:
+        """Reserve the single WS attachment slot.
 
-    def ws_owner_generation(self) -> int:
-        with self._ws_owner_lock:
-            return self._ws_owner_generation
+        Returns a token for the connection if attach is granted, otherwise
+        returns None (already attached + not stale).
+        """
+        now = time.time()
+        with self._ws_attach_lock:
+            if self._ws_attached and (now - self._ws_last_seen) < self._ws_timeout_s:
+                return None
+            self._ws_token += 1
+            token = self._ws_token
+            self._ws_attached = True
+            self._ws_peer = peer
+            self._ws_last_seen = now
+            return token
+
+    def touch_ws(self, token: int) -> None:
+        with self._ws_attach_lock:
+            if self._ws_attached and token == self._ws_token:
+                self._ws_last_seen = time.time()
+
+    def release_ws(self, token: int) -> None:
+        with self._ws_attach_lock:
+            if token != self._ws_token:
+                return
+            self._ws_attached = False
+            self._ws_peer = None
+            self._ws_last_seen = 0.0
+
+    def ws_info(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._ws_attach_lock:
+            attached = self._ws_attached
+            peer = self._ws_peer
+            last_seen = self._ws_last_seen
+            timeout_s = self._ws_timeout_s
+        return {
+            "attached": attached,
+            "peer": peer,
+            "last_seen_age_s": max(0.0, now - last_seen) if (attached and last_seen > 0) else None,
+            "timeout_s": timeout_s,
+        }
+
+    def ws_timeout_s(self) -> float:
+        with self._ws_attach_lock:
+            return float(self._ws_timeout_s)
 
     def remove_subscriber(self, q: "queue.Queue[str]") -> None:
         with self._subs_lock:
@@ -423,6 +476,10 @@ class _ControlHandler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "version": self.version,
                 "uptime_s": time.time() - self.state.start_time,
+                "ws": {
+                    **self.state.ws_info(),
+                    "subscribers": self.state.subscriber_count(),
+                },
             })
             return
         if path == "/api/calibration/tweaks":
@@ -459,7 +516,12 @@ class _ControlHandler(BaseHTTPRequestHandler):
             self._serve_snapshot()
             return
         if path == "/ws/hits":
-            self._handle_websocket()
+            peer = f"{self.client_address[0]}:{self.client_address[1]}"
+            token = self.state.try_attach_ws(peer)
+            if token is None:
+                self._json(409, {"error": "already_attached", "ws": self.state.ws_info()})
+                return
+            self._handle_websocket(token)
             return
         self._json(404, {"error": "not_found", "path": path})
 
@@ -590,12 +652,13 @@ class _ControlHandler(BaseHTTPRequestHandler):
             self.state.preview_consumer_exit()
 
     # ---- WebSocket ----
-    def _handle_websocket(self) -> None:
+    def _handle_websocket(self, token: int) -> None:
         sec_key = self.headers.get("Sec-WebSocket-Key")
         upgrade = (self.headers.get("Upgrade") or "").lower()
         connection = (self.headers.get("Connection") or "").lower()
         if not sec_key or "websocket" not in upgrade or "upgrade" not in connection:
             self._json(400, {"error": "expected_websocket_upgrade"})
+            self.state.release_ws(token)
             return
 
         accept = _ws_accept(sec_key)
@@ -609,6 +672,7 @@ class _ControlHandler(BaseHTTPRequestHandler):
             self.wfile.write(handshake)
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
+            self.state.release_ws(token)
             return
 
         sock = self.connection
@@ -616,8 +680,6 @@ class _ControlHandler(BaseHTTPRequestHandler):
 
         sub = self.state.add_subscriber()
 
-        # Single-client policy: the latest connection wins.
-        my_gen = self.state.claim_ws_ownership()
         # One-shot calibration state on connect.
         try:
             sub.put_nowait(json.dumps({
@@ -630,9 +692,11 @@ class _ControlHandler(BaseHTTPRequestHandler):
         print(f"[control_server] ws client connected ({self.state.subscriber_count()} total)")
         try:
             last_pong = 0.0
+            last_seen = time.time()
             while True:
-                # If a newer client connected, close this socket.
-                if my_gen != self.state.ws_owner_generation():
+                # Stale/abandoned client: if we haven't seen a heartbeat
+                # for long enough, detach so another device can attach.
+                if time.time() - last_seen > self.state.ws_timeout_s():
                     try:
                         sock.sendall(_ws_encode_close())
                     except Exception:
@@ -666,6 +730,7 @@ class _ControlHandler(BaseHTTPRequestHandler):
                 try:
                     data = sock.recv(2)
                 except OSError:
+                    # Timeout/no data — keep looping but enforce stale timeout.
                     if drained:
                         continue
                     continue
@@ -702,6 +767,11 @@ class _ControlHandler(BaseHTTPRequestHandler):
                     remaining -= len(chunk)
                 if masked and mask_key:
                     payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+
+                # Any inbound frame counts as liveness.
+                last_seen = time.time()
+                self.state.touch_ws(token)
+
                 if opcode == 0x8:  # close
                     try:
                         sock.sendall(_ws_encode_close())
@@ -726,6 +796,7 @@ class _ControlHandler(BaseHTTPRequestHandler):
                         pass
         finally:
             self.state.remove_subscriber(sub)
+            self.state.release_ws(token)
             print(f"[control_server] ws client disconnected ({self.state.subscriber_count()} total)")
 
 
