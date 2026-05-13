@@ -522,9 +522,8 @@ def main():
     print(f"Headless mode: {headless}")
 
     stream = create_camera_stream(_config)
-    if not stream.open():
-        print("Ne mogu da otvorim camera stream (picam/rtsp).")
-        return
+    stream_open = False
+    RECONNECT_DELAY_S = 2.0
 
     detector = LaserDetector(
         lower_red_1=LOWER_RED_1,
@@ -675,10 +674,23 @@ def main():
 
     try:
         while True:
+            if not stream_open:
+                if not stream.open():
+                    print("Ne mogu da otvorim camera stream (picam/rtsp). Retrying...")
+                    time.sleep(RECONNECT_DELAY_S)
+                    continue
+                stream_open = True
+
             ret, frame = stream.read()
             if not ret or frame is None:
-                print("Nema frame-a ili je stream prekinut.")
-                break
+                print("Nema frame-a ili je stream prekinut. Reconnecting...")
+                try:
+                    stream.release()
+                except Exception:
+                    pass
+                stream_open = False
+                time.sleep(RECONNECT_DELAY_S)
+                continue
 
             frame_h, frame_w = frame.shape[:2]
 

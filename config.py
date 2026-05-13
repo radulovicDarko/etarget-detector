@@ -78,9 +78,10 @@ LOWER_RED_2 = (163, 120, 120)
 UPPER_RED_2 = (179, 255, 255)
 
 # Purple / violet (laser core that overexposed the sensor → halo reads
-# as deep blue-violet). Empirically hue 110-145 covers most CM3 cases.
-LOWER_PURPLE = (110, 80, 100)
-UPPER_PURPLE = (145, 255, 255)
+# as deep blue-violet). Some cameras blow the core out to near-white which
+# lowers saturation, so keep S/V thresholds a bit more permissive.
+LOWER_PURPLE = (105, 40, 80)
+UPPER_PURPLE = (165, 255, 255)
 
 MIN_AREA = 2
 MAX_AREA = 5000

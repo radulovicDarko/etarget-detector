@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import time
+import os
 
 
 class LaserDetector:
@@ -18,6 +19,7 @@ class LaserDetector:
         # Pass None on both to disable the third mask.
         lower_extra=None,
         upper_extra=None,
+        debug: bool = False,
     ):
         self.lower_red_1 = np.array(lower_red_1, dtype=np.uint8)
         self.upper_red_1 = np.array(upper_red_1, dtype=np.uint8)
@@ -33,6 +35,8 @@ class LaserDetector:
         self.min_area = min_area
         self.max_area = max_area
         self.shot_cooldown_ms = shot_cooldown_ms
+
+        self.debug = bool(debug) or (os.environ.get("SHOOTERRANGE_DEBUG_BLOBS", "").strip() in ("1", "true", "yes", "on"))
 
         self.last_shot_time = 0
         self.kernel = np.ones((3, 3), np.uint8)
@@ -64,7 +68,7 @@ class LaserDetector:
                 best_area = area
                 best_idx = i
 
-        if all_areas:
+        if self.debug and all_areas:
             print(f"[DEBUG] blobs={len(all_areas)} areas={all_areas} min_cfg={self.min_area} max_cfg={self.max_area} accepted={'YES' if best_idx != -1 else 'NO'}")
 
         if best_idx == -1:
