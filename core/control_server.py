@@ -734,15 +734,6 @@ class _ControlHandler(BaseHTTPRequestHandler):
             last_pong = 0.0
             last_seen = time.time()
             while True:
-                # Takeover by the same device increments the state's token.
-                # Old connections see a mismatch and get closed.
-                if token != self.state.ws_token():
-                    try:
-                        sock.sendall(_ws_encode_close())
-                    except Exception:
-                        pass
-                    return
-
                 # Stale/abandoned client: if we haven't seen a heartbeat
                 # for long enough, detach so another device can attach.
                 if time.time() - last_seen > self.state.ws_timeout_s():
