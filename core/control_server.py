@@ -30,12 +30,6 @@ Implementation notes:
 - The cv2 main loop pushes JPEGs via ``state.push_frame``, publishes hits via
   ``state.publish_hit``, and consumes pending freeze requests via
   ``state.consume_freeze_request``.
-
-Attachment policy:
-- Exactly one mobile device can be attached over WebSocket at a time.
-- A second device attempting to connect receives HTTP 409 (already_attached).
-- Detach happens on clean WS close, or automatically after a heartbeat timeout
-    if the client disappears without closing the socket.
 """
 from __future__ import annotations
 
@@ -83,6 +77,7 @@ class ControlState:
         self._ws_attached = False
         self._ws_token = 0
         self._ws_peer: Optional[str] = None
+        self._ws_client_id: Optional[str] = None
         self._ws_last_seen = 0.0
         self._ws_timeout_s = 45.0
 
@@ -238,7 +233,7 @@ class ControlState:
             self._subscribers.append(q)
         return q
 
-    def try_attach_ws(self, peer: str) -> Optional[int]:
+    def try_attach_ws(self, peer: str, client_id: Optional[str]) -> Optional[int]:
         """Reserve the single WS attachment slot.
 
         Returns a token for the connection if attach is granted, otherwise
@@ -247,13 +242,26 @@ class ControlState:
         now = time.time()
         with self._ws_attach_lock:
             if self._ws_attached and (now - self._ws_last_seen) < self._ws_timeout_s:
+                # Attached and not stale. Allow SAME device to take over (e.g.
+                # app restart / hot reload) if it presents the same client_id.
+                if client_id and self._ws_client_id and client_id == self._ws_client_id:
+                    self._ws_token += 1
+                    token = self._ws_token
+                    self._ws_peer = peer
+                    self._ws_last_seen = now
+                    return token
                 return None
             self._ws_token += 1
             token = self._ws_token
             self._ws_attached = True
             self._ws_peer = peer
+            self._ws_client_id = client_id
             self._ws_last_seen = now
             return token
+
+    def ws_token(self) -> int:
+        with self._ws_attach_lock:
+            return int(self._ws_token)
 
     def touch_ws(self, token: int) -> None:
         with self._ws_attach_lock:
@@ -266,6 +274,7 @@ class ControlState:
                 return
             self._ws_attached = False
             self._ws_peer = None
+            self._ws_client_id = None
             self._ws_last_seen = 0.0
 
     def ws_info(self) -> Dict[str, Any]:
@@ -517,7 +526,9 @@ class _ControlHandler(BaseHTTPRequestHandler):
             return
         if path == "/ws/hits":
             peer = f"{self.client_address[0]}:{self.client_address[1]}"
-            token = self.state.try_attach_ws(peer)
+            qs = parse_qs(urlsplit(self.path).query)
+            client_id = qs.get("client_id", [None])[0]
+            token = self.state.try_attach_ws(peer, client_id)
             if token is None:
                 self._json(409, {"error": "already_attached", "ws": self.state.ws_info()})
                 return
@@ -694,6 +705,15 @@ class _ControlHandler(BaseHTTPRequestHandler):
             last_pong = 0.0
             last_seen = time.time()
             while True:
+                # Takeover by the same device increments the state's token.
+                # Old connections see a mismatch and get closed.
+                if token != self.state.ws_token():
+                    try:
+                        sock.sendall(_ws_encode_close())
+                    except Exception:
+                        pass
+                    return
+
                 # Stale/abandoned client: if we haven't seen a heartbeat
                 # for long enough, detach so another device can attach.
                 if time.time() - last_seen > self.state.ws_timeout_s():

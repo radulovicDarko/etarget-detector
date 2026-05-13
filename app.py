@@ -5,8 +5,6 @@ import time
 import cv2
 import numpy as np
 
-import config as config_module
-
 try:
     import pygame
     pygame.mixer.init()
@@ -63,10 +61,9 @@ from config import (
     AUTH_TOKEN,
     APP_VERSION,
     MJPEG_QUALITY,
-    is_headless,
 )
 
-from core.camera import create_camera_stream
+from core.ffmpeg_stream import FFmpegStream
 from core.utils import FPSTimer, resize_to_fit
 from core.detector import LaserDetector
 from core.unity_sender import UnitySender
@@ -507,10 +504,16 @@ def project_paper_circle(h_paper_to_image, cx_mm, cy_mm, r_mm, n=96):
 
 
 def main():
-    # Camera backend selection:
-    # - Raspberry Pi + picamera2 available => PiCamStream
-    # - otherwise fallback to RTSP/FFmpeg pipeline (dev workflow)
-    stream = create_camera_stream(config_module)
+    stream = FFmpegStream(
+        ffmpeg_path=FFMPEG_PATH,
+        rtsp_url=RTSP_URL,
+        transport=RTSP_TRANSPORT,
+        scale=JPEG_SCALE
+    )
+
+    if not stream.open():
+        print("Ne mogu da otvorim FFmpeg JPEG stream.")
+        return
 
     detector = LaserDetector(
         lower_red_1=LOWER_RED_1,
@@ -577,12 +580,9 @@ def main():
     _auto_samples: list[tuple] = []
     _auto_samples_target: int = 0
 
-    headless = is_headless()
-    if headless:
-        print("Headless mode: OpenCV windows disabled")
-    else:
-        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
-        cv2.namedWindow("Laser Mask", cv2.WINDOW_AUTOSIZE)
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
+
+    cv2.namedWindow("Laser Mask", cv2.WINDOW_AUTOSIZE)
 
     # Mobile control server (HTTP API + MJPEG preview).
     control_state = None
@@ -657,27 +657,12 @@ def main():
         print(f"Target ROI: ({TARGET_X1}, {TARGET_Y1}) -> ({TARGET_X2}, {TARGET_Y2})")
     print("Press 'q' to quit.")
 
-    # When running as a systemd service (headless), the camera/RTSP source may
-    # be temporarily unavailable. Do not exit the process (which would trigger
-    # systemd restarts); keep the HTTP control server alive and retry.
-    RECONNECT_DELAY_S = 2.0
-    stream_open = False
-
     try:
         while True:
-            if not stream_open:
-                if not stream.open():
-                    print("Ne mogu da otvorim camera stream. Retrying...")
-                    time.sleep(RECONNECT_DELAY_S)
-                    continue
-                stream_open = True
             ret, frame = stream.read()
             if not ret or frame is None:
-                print("Nema frame-a ili je stream prekinut. Reconnecting...")
-                stream.release()
-                stream_open = False
-                time.sleep(RECONNECT_DELAY_S)
-                continue
+                print("Nema frame-a ili je stream prekinut.")
+                break
 
             frame_h, frame_w = frame.shape[:2]
 
@@ -1213,9 +1198,8 @@ def main():
             display_frame = resize_to_fit(frame, DISPLAY_MAX_WIDTH, DISPLAY_MAX_HEIGHT)
             display_mask = resize_to_fit(mask, 600, 400)
 
-            if not headless:
-                cv2.imshow(WINDOW_NAME, display_frame)
-                cv2.imshow("Laser Mask", display_mask)
+            cv2.imshow(WINDOW_NAME, display_frame)
+            cv2.imshow("Laser Mask", display_mask)
 
             # Push the annotated frame to the mobile preview stream.
             if control_state is not None:
@@ -1227,9 +1211,7 @@ def main():
                 if ok_jpg:
                     control_state.push_frame(jpg_buf.tobytes())
 
-            key = 255
-            if not headless:
-                key = cv2.waitKey(1) & 0xFF
+            key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
             if key == ord("r"):
@@ -1344,8 +1326,7 @@ def main():
         if unity_sender is not None:
             unity_sender.close()
         stream.release()
-        if not headless:
-            cv2.destroyAllWindows()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

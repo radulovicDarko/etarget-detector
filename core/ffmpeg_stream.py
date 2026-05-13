@@ -65,25 +65,9 @@ class FFmpegStream:
                 return True, frame
 
     def release(self):
-        if self.process is None:
-            return
-
-        try:
+        if self.process is not None:
             if self.process.stdout:
-                try:
-                    self.process.stdout.close()
-                except Exception:
-                    pass
-            try:
-                self.process.kill()
-            except ProcessLookupError:
-                pass
-            except Exception:
-                pass
-            try:
-                self.process.wait(timeout=2)
-            except Exception:
-                pass
-        finally:
+                self.process.stdout.close()
+            self.process.kill()
+            self.process.wait()
             self.process = None
-            self.buffer = bytearray()
