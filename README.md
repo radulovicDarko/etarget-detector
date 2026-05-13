@@ -7,6 +7,9 @@
 3. Pokreni:
    python app.py
 
+Headless (bez monitora / systemd servis):
+- `SHOOTERRANGE_HEADLESS=1 python app.py`
+
 ## Komande
 - q = izlaz
 - a = toggle auto-align
@@ -29,7 +32,9 @@ React Native mobile aplikacija koristi za pairing, live preview i kalibraciju.
 
 Endpoints:
 - `GET  /api/health`              — health check (pairing probe)
+- `GET  /health` / `GET /healthz` — aliasi (neki client-i probe-uju ove putanje)
 - `POST /api/pair`                — vraća dev token (no real auth)
+- `GET  /api/pair` / `GET /pair`  — kompatibilni probe za discovery
 - `GET  /api/stream/preview.mjpeg` — MJPEG stream anotirane slike (isto kao cv2 prozor)
 - `POST /api/calibration/freeze`   — programatska zamena za pritisak `n` (zaledi)
 - `POST /api/calibration/unfreeze` — odledi

@@ -49,8 +49,28 @@ def is_headless() -> bool:
         return True
     if HEADLESS in ("0", "false", "no", "off"):
         return False
-    # auto: assume headless when no display server is reachable.
-    return not (_os.environ.get("DISPLAY") or _os.environ.get("WAYLAND_DISPLAY"))
+    # auto: treat as headless unless a display socket looks reachable.
+    disp = _os.environ.get("DISPLAY")
+    if disp:
+        # Typical X11 socket path: /tmp/.X11-unix/X0 for DISPLAY=:0
+        # systemd services sometimes inherit DISPLAY even when no X server
+        # is actually running, which would otherwise crash OpenCV's Qt backend.
+        try:
+            d = disp.split(":", 1)[-1]
+            d = d.split(".", 1)[0]
+            n = int(d)
+        except Exception:
+            n = 0
+        if _os.path.exists(f"/tmp/.X11-unix/X{n}"):
+            return False
+
+    wayland = _os.environ.get("WAYLAND_DISPLAY")
+    if wayland:
+        xdg = _os.environ.get("XDG_RUNTIME_DIR")
+        if xdg and _os.path.exists(_os.path.join(xdg, wayland)):
+            return False
+
+    return True
 
 # Path to ffmpeg binary. By default uses whatever is on PATH (works on macOS/Linux
 # after `brew install ffmpeg` or `apt install ffmpeg`, and on Windows if ffmpeg.exe

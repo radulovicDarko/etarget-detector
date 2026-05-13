@@ -61,6 +61,7 @@ from config import (
     AUTH_TOKEN,
     APP_VERSION,
     MJPEG_QUALITY,
+    is_headless,
 )
 
 from core.ffmpeg_stream import FFmpegStream
@@ -580,9 +581,12 @@ def main():
     _auto_samples: list[tuple] = []
     _auto_samples_target: int = 0
 
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
-
-    cv2.namedWindow("Laser Mask", cv2.WINDOW_AUTOSIZE)
+    headless = is_headless()
+    if headless:
+        print("Headless mode: OpenCV windows disabled")
+    else:
+        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
+        cv2.namedWindow("Laser Mask", cv2.WINDOW_AUTOSIZE)
 
     # Mobile control server (HTTP API + MJPEG preview).
     control_state = None
@@ -1198,8 +1202,9 @@ def main():
             display_frame = resize_to_fit(frame, DISPLAY_MAX_WIDTH, DISPLAY_MAX_HEIGHT)
             display_mask = resize_to_fit(mask, 600, 400)
 
-            cv2.imshow(WINDOW_NAME, display_frame)
-            cv2.imshow("Laser Mask", display_mask)
+            if not headless:
+                cv2.imshow(WINDOW_NAME, display_frame)
+                cv2.imshow("Laser Mask", display_mask)
 
             # Push the annotated frame to the mobile preview stream.
             if control_state is not None:
@@ -1211,7 +1216,9 @@ def main():
                 if ok_jpg:
                     control_state.push_frame(jpg_buf.tobytes())
 
-            key = cv2.waitKey(1) & 0xFF
+            key = 255
+            if not headless:
+                key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
             if key == ord("r"):
