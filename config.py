@@ -85,7 +85,14 @@ UPPER_PURPLE = (145, 255, 255)
 MIN_AREA = 2
 MAX_AREA = 5000
 
-SHOT_COOLDOWN_MS = 300
+# Minimum gap between two accepted hits, in milliseconds. Acts as a
+# debouncer so a single laser pulse that lights up multiple consecutive
+# camera frames isn't counted twice. Lower → more rapid-fire throughput,
+# but raises false-double risk if your laser pulse is long.
+#  - 300 ms = max ~3 hits/s (very conservative, original default)
+#  - 120 ms = max ~8 hits/s, comfortable for fast trigger work
+#  - 80 ms  = max ~12 hits/s (close to the human limit)
+SHOT_COOLDOWN_MS = 120
 
 # Feature flag: master switch for the whole Unity UDP sender.
 # When False, no UnitySender is created, no socket is opened, and no packets are sent.

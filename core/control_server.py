@@ -64,6 +64,20 @@ class ControlState:
         self._subs_lock = threading.Lock()
         self._subscribers: List["queue.Queue[str]"] = []
 
+        # Counter incremented while a preview consumer (MJPEG stream OR
+        # snapshot poll) is actively waiting for a frame. The cv2 main
+        # loop reads this via `preview_wanted()` and skips JPEG encoding
+        # entirely when nobody's looking — saves ~3-8 ms/frame on the Pi
+        # during live sessions, which translates directly to fewer missed
+        # laser pulses.
+        self._preview_lock = threading.Lock()
+        self._preview_consumers = 0
+        # Snapshot polls (preview.jpg) are short — we keep encoding warm
+        # for a brief window after the last poll so back-to-back polls
+        # don't toggle the encode on/off.
+        self._preview_grace_until = 0.0
+        self._preview_grace_seconds = 1.5
+
         self.start_time = time.time()
         self.is_frozen = False  # mirrored from main loop, read by HTTP
 
@@ -105,6 +119,33 @@ class ControlState:
         self._frame_event.wait(timeout=timeout)
         with self._frame_lock:
             return self._jpeg
+
+    # ---- preview consumer accounting ----
+    def preview_wanted(self) -> bool:
+        """True when at least one HTTP client is reading the preview stream
+        OR a snapshot was polled within the grace window. Used by the cv2
+        main loop to skip JPEG encoding entirely when nobody is watching.
+        """
+        with self._preview_lock:
+            if self._preview_consumers > 0:
+                return True
+            return time.time() < self._preview_grace_until
+
+    def preview_consumer_enter(self) -> None:
+        with self._preview_lock:
+            self._preview_consumers += 1
+
+    def preview_consumer_exit(self) -> None:
+        with self._preview_lock:
+            if self._preview_consumers > 0:
+                self._preview_consumers -= 1
+
+    def preview_snapshot_polled(self) -> None:
+        """Mark a one-shot snapshot poll. Keeps encoding warm for a brief
+        window so back-to-back polls (the calibration screen polls every
+        100 ms) don't churn the on/off boundary on every frame."""
+        with self._preview_lock:
+            self._preview_grace_until = time.time() + self._preview_grace_seconds
 
     # ---- freeze request queue ----
     def request_freeze(self, freeze: bool) -> None:
@@ -414,6 +455,10 @@ class _ControlHandler(BaseHTTPRequestHandler):
 
     # ---- snapshot + MJPEG ----
     def _serve_snapshot(self) -> None:
+        # Keep encoding warm — the calibration screen polls this every
+        # 100 ms, so a "consumer just left" between polls would otherwise
+        # cause a one-frame gap.
+        self.state.preview_snapshot_polled()
         jpeg = self.state.get_latest_jpeg(timeout=2.0)
         if jpeg is None:
             self._json(503, {"error": "no_frame_yet"})
@@ -442,6 +487,9 @@ class _ControlHandler(BaseHTTPRequestHandler):
         self.send_header("Pragma", "no-cache")
         self._cors()
         self.end_headers()
+        # Long-lived consumer — register so the cv2 loop knows to keep
+        # encoding frames. Always pair with consumer_exit on disconnect.
+        self.state.preview_consumer_enter()
         try:
             while True:
                 jpeg = self.state.get_latest_jpeg(timeout=2.0)
@@ -461,6 +509,8 @@ class _ControlHandler(BaseHTTPRequestHandler):
                     return
         except Exception as e:  # noqa: BLE001
             print(f"[control_server] mjpeg client dropped: {e}")
+        finally:
+            self.state.preview_consumer_exit()
 
     # ---- WebSocket ----
     def _handle_websocket(self) -> None:

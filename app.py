@@ -1205,8 +1205,13 @@ def main():
                 cv2.imshow(WINDOW_NAME, display_frame)
                 cv2.imshow("Laser Mask", display_mask)
 
-            # Push the annotated frame to the mobile preview stream.
-            if control_state is not None:
+            # Push the annotated frame to the mobile preview stream — but
+            # ONLY when somebody is actually watching. JPEG encoding eats
+            # ~3-8 ms per frame on Pi 5, which translates directly to fewer
+            # missed laser pulses during live shooting. The `preview_wanted()`
+            # check returns True while the calibration screen is polling
+            # snapshots (with grace window) or an MJPEG stream is open.
+            if control_state is not None and control_state.preview_wanted():
                 ok_jpg, jpg_buf = cv2.imencode(
                     ".jpg",
                     display_frame,
