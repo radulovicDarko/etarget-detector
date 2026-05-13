@@ -512,10 +512,6 @@ def main():
         scale=JPEG_SCALE
     )
 
-    if not stream.open():
-        print("Ne mogu da otvorim FFmpeg JPEG stream.")
-        return
-
     detector = LaserDetector(
         lower_red_1=LOWER_RED_1,
         upper_red_1=UPPER_RED_1,
@@ -661,12 +657,24 @@ def main():
         print(f"Target ROI: ({TARGET_X1}, {TARGET_Y1}) -> ({TARGET_X2}, {TARGET_Y2})")
     print("Press 'q' to quit.")
 
+    # When running as a systemd service (headless), the camera/RTSP source may
+    # be temporarily unavailable. Do not exit the process (which would trigger
+    # systemd restarts); keep the HTTP control server alive and retry.
+    RECONNECT_DELAY_S = 2.0
+
     try:
         while True:
+            if stream.process is None:
+                if not stream.open():
+                    print("Ne mogu da otvorim FFmpeg JPEG stream. Retrying...")
+                    time.sleep(RECONNECT_DELAY_S)
+                    continue
             ret, frame = stream.read()
             if not ret or frame is None:
-                print("Nema frame-a ili je stream prekinut.")
-                break
+                print("Nema frame-a ili je stream prekinut. Reconnecting...")
+                stream.release()
+                time.sleep(RECONNECT_DELAY_S)
+                continue
 
             frame_h, frame_w = frame.shape[:2]
 
@@ -1333,7 +1341,8 @@ def main():
         if unity_sender is not None:
             unity_sender.close()
         stream.release()
-        cv2.destroyAllWindows()
+        if not headless:
+            cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
