@@ -66,6 +66,11 @@ class ControlState:
         self._subs_lock = threading.Lock()
         self._subscribers: List["queue.Queue[str]"] = []
 
+        # WebSocket ownership: at most one active WS client at a time.
+        # When a new client connects, older clients are asked to disconnect.
+        self._ws_owner_lock = threading.Lock()
+        self._ws_owner_generation = 0
+
         # ---- reliable hit delivery ----
         # Every published hit gets a monotonic seq number. The mobile app
         # tracks the last seq it processed and detects gaps; if a hit is
@@ -217,6 +222,16 @@ class ControlState:
         with self._subs_lock:
             self._subscribers.append(q)
         return q
+
+    def claim_ws_ownership(self) -> int:
+        """Return a new generation id for the currently connecting WS client."""
+        with self._ws_owner_lock:
+            self._ws_owner_generation += 1
+            return self._ws_owner_generation
+
+    def ws_owner_generation(self) -> int:
+        with self._ws_owner_lock:
+            return self._ws_owner_generation
 
     def remove_subscriber(self, q: "queue.Queue[str]") -> None:
         with self._subs_lock:
@@ -600,6 +615,9 @@ class _ControlHandler(BaseHTTPRequestHandler):
         sock.settimeout(0.5)
 
         sub = self.state.add_subscriber()
+
+        # Single-client policy: the latest connection wins.
+        my_gen = self.state.claim_ws_ownership()
         # One-shot calibration state on connect.
         try:
             sub.put_nowait(json.dumps({
@@ -611,7 +629,16 @@ class _ControlHandler(BaseHTTPRequestHandler):
 
         print(f"[control_server] ws client connected ({self.state.subscriber_count()} total)")
         try:
+            last_pong = 0.0
             while True:
+                # If a newer client connected, close this socket.
+                if my_gen != self.state.ws_owner_generation():
+                    try:
+                        sock.sendall(_ws_encode_close())
+                    except Exception:
+                        pass
+                    return
+
                 # Drain queued outgoing messages.
                 drained = False
                 try:
@@ -624,6 +651,16 @@ class _ControlHandler(BaseHTTPRequestHandler):
                             return
                 except queue.Empty:
                     pass
+
+                # Heartbeat: send a lightweight pong periodically so the
+                # mobile client can detect liveness even when no hits flow.
+                now = time.time()
+                if now - last_pong >= 10.0:
+                    try:
+                        sock.sendall(_ws_encode_text(json.dumps({"type": "pong"})))
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        return
+                    last_pong = now
 
                 # Try a non-blocking peek for control frames.
                 try:
@@ -676,7 +713,17 @@ class _ControlHandler(BaseHTTPRequestHandler):
                         sock.sendall(_ws_encode_pong(payload[:125]))
                     except Exception:
                         return
-                # Text frames from client (e.g. {"type":"ping"}) are ignored.
+                if opcode == 0x1 and payload:  # text
+                    # Mobile client sends JSON {"type":"ping"} heartbeats.
+                    # Reply with a JSON pong so the app can reset its silence
+                    # timer even when no hits are being produced.
+                    try:
+                        obj = json.loads(payload.decode("utf-8"))
+                        if isinstance(obj, dict) and obj.get("type") == "ping":
+                            sock.sendall(_ws_encode_text(json.dumps({"type": "pong"})))
+                            last_pong = time.time()
+                    except Exception:
+                        pass
         finally:
             self.state.remove_subscriber(sub)
             print(f"[control_server] ws client disconnected ({self.state.subscriber_count()} total)")
