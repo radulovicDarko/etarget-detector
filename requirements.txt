@@ -1,0 +1,6 @@
+numpy==2.4.4
+opencv-python==4.13.0.92
+
+# Raspberry Pi only — install via apt instead of pip:
+#   sudo apt install -y python3-picamera2 python3-libcamera
+# (kept out of pip requirements because picamera2 has no PyPI wheel for non-Pi)

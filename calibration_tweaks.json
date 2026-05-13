@@ -1,0 +1,13 @@
+{
+  "scale_factor": 1.0,
+  "offset_x_mm": 0.0,
+  "offset_y_mm": 0.0,
+  "rotation_deg": 0.0,
+  "aspect_ratio": 1.0,
+  "keystone_h": 0.065,
+  "keystone_v": -0.005,
+  "keystone_d1": -0.03,
+  "keystone_d2": 0.025,
+  "paper_rotation_deg": 0.0,
+  "paper_scale": 1.0
+}
