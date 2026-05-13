@@ -490,6 +490,9 @@ class _ControlHandler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "version": self.version,
                 "uptime_s": time.time() - self.state.start_time,
+                "calibration": {
+                    "frozen": bool(self.state.is_frozen),
+                },
                 "ws": {
                     **self.state.ws_info(),
                     "subscribers": self.state.subscriber_count(),
@@ -552,10 +555,12 @@ class _ControlHandler(BaseHTTPRequestHandler):
             })
             return
         if path == "/api/calibration/freeze":
+            print("[http] calibration freeze")
             self.state.request_freeze(True)
             self._json(200, {"ok": True, "frozen": True})
             return
         if path == "/api/calibration/unfreeze":
+            print("[http] calibration unfreeze")
             self.state.request_freeze(False)
             self._json(200, {"ok": True, "frozen": False})
             return

@@ -1311,6 +1311,9 @@ def main():
                 http_req = control_state.consume_freeze_request()
                 if http_req is not None:
                     freeze_target = bool(http_req)
+                    # Helps diagnose headless setups where freeze only comes
+                    # from HTTP (no keyboard).
+                    print(f"[http] freeze_request consumed -> {freeze_target}")
 
             if freeze_target is not None and freeze_target != align_frozen:
                 align_frozen = freeze_target
