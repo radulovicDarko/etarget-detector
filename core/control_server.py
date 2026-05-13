@@ -11,6 +11,7 @@ Endpoints:
   GET  /api/health                       -> {status, version, uptime_s}
   POST /api/pair                         -> {token, device_name, device_id}
   GET  /api/target/config                -> target geometry (mm)
+  GET  /api/hits/replay?since=N          -> backfill missed hits (since seq N)
   GET  /api/stream/preview.mjpeg         -> multipart MJPEG (browser/VLC)
   GET  /api/stream/preview.jpg           -> single JPEG snapshot (mobile poll)
   POST /api/calibration/freeze           -> queue freeze (== keypress 'n')
@@ -41,6 +42,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, urlsplit
 
 
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -63,6 +65,18 @@ class ControlState:
 
         self._subs_lock = threading.Lock()
         self._subscribers: List["queue.Queue[str]"] = []
+
+        # ---- reliable hit delivery ----
+        # Every published hit gets a monotonic seq number. The mobile app
+        # tracks the last seq it processed and detects gaps; if a hit is
+        # missing it requests a replay via the WS (or REST as fallback).
+        # Buffer keeps the last N hits in memory so we never need disk.
+        # 256 covers >30s of olympic rapid fire — way more than any
+        # reasonable Wi-Fi disconnect window.
+        self._seq_lock = threading.Lock()
+        self._next_seq = 1
+        self._hit_buffer: List[Dict[str, Any]] = []
+        self._hit_buffer_max = 256
 
         # Counter incremented while a preview consumer (MJPEG stream OR
         # snapshot poll) is actively waiting for a frame. The cv2 main
@@ -249,28 +263,59 @@ class ControlState:
     # session id before storing.
 
     def publish_hit(self, hit: Dict[str, Any]) -> None:
-        """Broadcast a fresh hit to all WebSocket subscribers.
+        """Broadcast a fresh hit to all WebSocket subscribers AND store it
+        in the replay buffer so a mobile client that detects a gap can
+        request the missed message(s).
 
         ``hit`` should already contain x_norm, y_norm, score, ring, x_mm,
-        y_mm, dist_mm, is_inner_ten. ``ts`` and a placeholder session_id
-        are added here.
+        y_mm, dist_mm, is_inner_ten. ``ts``, ``seq`` and a placeholder
+        session_id are added here.
         """
         ts = time.time()
-        message = {
-            "type": "hit",
-            "session_id": "live",
-            "ts": ts,
-            **hit,
-        }
+        with self._seq_lock:
+            seq = self._next_seq
+            self._next_seq += 1
+            message = {
+                "type": "hit",
+                "session_id": "live",
+                "ts": ts,
+                "seq": seq,
+                **hit,
+            }
+            # Append to ring buffer (drop oldest when full).
+            self._hit_buffer.append(message)
+            if len(self._hit_buffer) > self._hit_buffer_max:
+                # Trim from the front; cheap because we only do this once
+                # we've actually exceeded the cap.
+                drop = len(self._hit_buffer) - self._hit_buffer_max
+                del self._hit_buffer[:drop]
         t0 = time.time()
         self._broadcast(message)
         t_broadcast_ms = (time.time() - t0) * 1000.0
         n_subs = self.subscriber_count()
         print(
-            f"[hit] ts={ts:.3f} score={hit.get('score')} ring={hit.get('ring')} "
-            f"dist={hit.get('dist_mm', 0.0):.1f}mm "
+            f"[hit] seq={seq} ts={ts:.3f} score={hit.get('score')} "
+            f"ring={hit.get('ring')} dist={hit.get('dist_mm', 0.0):.1f}mm "
             f"subs={n_subs} broadcast={t_broadcast_ms:.1f}ms"
         )
+
+    def replay_hits_since(self, last_seq: int, max_count: int = 256) -> List[Dict[str, Any]]:
+        """Return all buffered hits with seq > last_seq, oldest first.
+
+        Used by the mobile app to backfill missed hits after detecting a
+        sequence gap. Capped at `max_count` to bound the response size.
+        """
+        with self._seq_lock:
+            result = [m for m in self._hit_buffer if m.get("seq", 0) > last_seq]
+        return result[:max_count]
+
+    def reset_seq(self) -> None:
+        """Reset the seq counter and clear the replay buffer. Called on
+        session boundaries so replay never returns hits from a previous
+        session. Mobile sees a fresh sequence starting from 1."""
+        with self._seq_lock:
+            self._next_seq = 1
+            self._hit_buffer.clear()
 
 
 # --------------------------------------------------------------------------
@@ -374,6 +419,23 @@ class _ControlHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/target/config":
             self._json(200, self.state.target_config)
+            return
+        if path == "/api/hits/replay":
+            # Backfill missed hits. Mobile sends ?since=N where N is the
+            # last seq it successfully processed; we return everything
+            # newer that's still in our 256-slot ring buffer. Optional
+            # `limit` caps the response size (default + max 256).
+            qs = parse_qs(urlsplit(self.path).query)
+            try:
+                since = int(qs.get("since", ["0"])[0])
+            except (ValueError, TypeError):
+                since = 0
+            try:
+                limit = max(1, min(256, int(qs.get("limit", ["256"])[0])))
+            except (ValueError, TypeError):
+                limit = 256
+            hits = self.state.replay_hits_since(since, max_count=limit)
+            self._json(200, {"hits": hits, "since": since, "count": len(hits)})
             return
         if path == "/api/stream/preview.mjpeg":
             self._stream_mjpeg()
