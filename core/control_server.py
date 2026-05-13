@@ -242,6 +242,16 @@ class ControlState:
         now = time.time()
         with self._ws_attach_lock:
             if self._ws_attached and (now - self._ws_last_seen) < self._ws_timeout_s:
+                def _peer_ip(p: Optional[str]) -> Optional[str]:
+                    if not p:
+                        return None
+                    # peer is typically "ip:port" (from client_address).
+                    # Use rsplit so IPv6 "::1:1234" still works somewhat.
+                    try:
+                        return p.rsplit(":", 1)[0]
+                    except Exception:
+                        return p
+
                 # Attached and not stale. Allow SAME device to take over (e.g.
                 # app restart / hot reload) if it presents the same client_id.
                 if client_id and self._ws_client_id and client_id == self._ws_client_id:
@@ -251,6 +261,20 @@ class ControlState:
                     self._ws_last_seen = now
                     print(f"[ws] takeover peer={peer} client_id={client_id} token={token}")
                     return token
+
+                # Transitional safety: if the app migrated its client_id format
+                # (e.g. random -> ios-idForVendor) but the peer IP is the same,
+                # allow takeover. This keeps single-device lock intact because
+                # other devices on the AP have different IPs.
+                if client_id and self._ws_peer and _peer_ip(peer) == _peer_ip(self._ws_peer):
+                    self._ws_token += 1
+                    token = self._ws_token
+                    self._ws_peer = peer
+                    self._ws_client_id = client_id
+                    self._ws_last_seen = now
+                    print(f"[ws] takeover(peer_ip) peer={peer} client_id={client_id} token={token}")
+                    return token
+
                 print(f"[ws] deny already_attached peer={peer} client_id={client_id} attached_peer={self._ws_peer}")
                 return None
             self._ws_token += 1
@@ -285,11 +309,13 @@ class ControlState:
         with self._ws_attach_lock:
             attached = self._ws_attached
             peer = self._ws_peer
+            client_id = self._ws_client_id
             last_seen = self._ws_last_seen
             timeout_s = self._ws_timeout_s
         return {
             "attached": attached,
             "peer": peer,
+            "client_id": client_id,
             "last_seen_age_s": max(0.0, now - last_seen) if (attached and last_seen > 0) else None,
             "timeout_s": timeout_s,
         }
