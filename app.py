@@ -1217,90 +1217,89 @@ def main():
                 if ok_jpg:
                     control_state.push_frame(jpg_buf.tobytes())
 
-            if headless:
-                continue
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                break
-            if key == ord("r"):
-                total_score = 0
-                shot_count = 0
-                last_score = None
-                last_dist = 0.0
-                hit_history.clear()
-                print("Score reset.")
-            if key == ord("a"):
-                auto_align = not auto_align
-                bull_ema = None
-                align_frozen = False
-                frozen_snapshot = None
-                if control_state is not None:
-                    control_state.set_frozen(False)
-                print(f"Auto-align: {auto_align}")
-            # ---- Operator calibration tweaks ---------------------------
-            # Scale:    '+' / '-'   ring size  ±0.5%
-            # Centre:    h / l       left / right ±0.5 mm
-            #            k / j       up / down  ±0.5 mm
-            # Rotation:  , / .       rotate  ±0.5°
-            # Aspect:    [ / ]       Y/X ratio  ±0.5%
-            # Reset:     0           restore defaults
-            tweak_changed = False
-            tweak_deltas = {
-                ord("+"): {"scale_factor": +0.005},
-                ord("="): {"scale_factor": +0.005},
-                ord("-"): {"scale_factor": -0.005},
-                ord("_"): {"scale_factor": -0.005},
-                ord("h"): {"offset_x_mm": -0.5},
-                ord("l"): {"offset_x_mm": +0.5},
-                ord("k"): {"offset_y_mm": -0.5},
-                ord("j"): {"offset_y_mm": +0.5},
-                ord(","): {"rotation_deg": -0.5},
-                ord("."): {"rotation_deg": +0.5},
-                ord("["): {"aspect_ratio": -0.005},
-                ord("]"): {"aspect_ratio": +0.005},
-                ord("y"): {"keystone_h": -0.005},
-                ord("u"): {"keystone_h": +0.005},
-                ord("i"): {"keystone_v": -0.005},
-                ord("o"): {"keystone_v": +0.005},
-                # Diagonal keystones: t/g for d1 (TL-BR), b/m for d2 (TR-BL)
-                ord("t"): {"keystone_d1": -0.005},
-                ord("g"): {"keystone_d1": +0.005},
-                ord("b"): {"keystone_d2": -0.005},
-                ord("m"): {"keystone_d2": +0.005},
-                ord(";"): {"paper_rotation_deg": -0.5},
-                ord("'"): {"paper_rotation_deg": +0.5},
-                ord("<"): {"paper_scale": -0.005},
-                ord(">"): {"paper_scale": +0.005},
-            }
-            if key in tweak_deltas:
-                delta = tweak_deltas[key]
-                tweaks = CalibrationTweaks(
-                    scale_factor=tweaks.scale_factor + delta.get("scale_factor", 0.0),
-                    offset_x_mm=tweaks.offset_x_mm + delta.get("offset_x_mm", 0.0),
-                    offset_y_mm=tweaks.offset_y_mm + delta.get("offset_y_mm", 0.0),
-                    rotation_deg=tweaks.rotation_deg + delta.get("rotation_deg", 0.0),
-                    aspect_ratio=tweaks.aspect_ratio + delta.get("aspect_ratio", 0.0),
-                    keystone_h=tweaks.keystone_h + delta.get("keystone_h", 0.0),
-                    keystone_v=tweaks.keystone_v + delta.get("keystone_v", 0.0),
-                    keystone_d1=tweaks.keystone_d1 + delta.get("keystone_d1", 0.0),
-                    keystone_d2=tweaks.keystone_d2 + delta.get("keystone_d2", 0.0),
-                    paper_rotation_deg=tweaks.paper_rotation_deg + delta.get("paper_rotation_deg", 0.0),
-                    paper_scale=tweaks.paper_scale + delta.get("paper_scale", 0.0),
-                ).clamp()
-                tweak_changed = True
-            if key == ord("0"):
-                tweaks = CalibrationTweaks()
-                tweak_changed = True
-            if tweak_changed:
-                tweaks_box[0] = tweaks
-                save_tweaks(tweaks)
-                print(
-                    f"Tweaks: scale={tweaks.scale_factor:.3f} "
-                    f"aspect={tweaks.aspect_ratio:.3f} "
-                    f"rot={tweaks.rotation_deg:+.1f}° "
-                    f"offset=({tweaks.offset_x_mm:+.1f},{tweaks.offset_y_mm:+.1f}) mm"
-                )
+            key = None
+            if not headless:
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
+                if key == ord("r"):
+                    total_score = 0
+                    shot_count = 0
+                    last_score = None
+                    last_dist = 0.0
+                    hit_history.clear()
+                    print("Score reset.")
+                if key == ord("a"):
+                    auto_align = not auto_align
+                    bull_ema = None
+                    align_frozen = False
+                    frozen_snapshot = None
+                    if control_state is not None:
+                        control_state.set_frozen(False)
+                    print(f"Auto-align: {auto_align}")
+                # ---- Operator calibration tweaks ---------------------------
+                # Scale:    '+' / '-'   ring size  ±0.5%
+                # Centre:    h / l       left / right ±0.5 mm
+                #            k / j       up / down  ±0.5 mm
+                # Rotation:  , / .       rotate  ±0.5°
+                # Aspect:    [ / ]       Y/X ratio  ±0.5%
+                # Reset:     0           restore defaults
+                tweak_changed = False
+                tweak_deltas = {
+                    ord("+"): {"scale_factor": +0.005},
+                    ord("="): {"scale_factor": +0.005},
+                    ord("-"): {"scale_factor": -0.005},
+                    ord("_"): {"scale_factor": -0.005},
+                    ord("h"): {"offset_x_mm": -0.5},
+                    ord("l"): {"offset_x_mm": +0.5},
+                    ord("k"): {"offset_y_mm": -0.5},
+                    ord("j"): {"offset_y_mm": +0.5},
+                    ord(","): {"rotation_deg": -0.5},
+                    ord("."): {"rotation_deg": +0.5},
+                    ord("["): {"aspect_ratio": -0.005},
+                    ord("]"): {"aspect_ratio": +0.005},
+                    ord("y"): {"keystone_h": -0.005},
+                    ord("u"): {"keystone_h": +0.005},
+                    ord("i"): {"keystone_v": -0.005},
+                    ord("o"): {"keystone_v": +0.005},
+                    # Diagonal keystones: t/g for d1 (TL-BR), b/m for d2 (TR-BL)
+                    ord("t"): {"keystone_d1": -0.005},
+                    ord("g"): {"keystone_d1": +0.005},
+                    ord("b"): {"keystone_d2": -0.005},
+                    ord("m"): {"keystone_d2": +0.005},
+                    ord(";"): {"paper_rotation_deg": -0.5},
+                    ord("'"): {"paper_rotation_deg": +0.5},
+                    ord("<"): {"paper_scale": -0.005},
+                    ord(">"): {"paper_scale": +0.005},
+                }
+                if key in tweak_deltas:
+                    delta = tweak_deltas[key]
+                    tweaks = CalibrationTweaks(
+                        scale_factor=tweaks.scale_factor + delta.get("scale_factor", 0.0),
+                        offset_x_mm=tweaks.offset_x_mm + delta.get("offset_x_mm", 0.0),
+                        offset_y_mm=tweaks.offset_y_mm + delta.get("offset_y_mm", 0.0),
+                        rotation_deg=tweaks.rotation_deg + delta.get("rotation_deg", 0.0),
+                        aspect_ratio=tweaks.aspect_ratio + delta.get("aspect_ratio", 0.0),
+                        keystone_h=tweaks.keystone_h + delta.get("keystone_h", 0.0),
+                        keystone_v=tweaks.keystone_v + delta.get("keystone_v", 0.0),
+                        keystone_d1=tweaks.keystone_d1 + delta.get("keystone_d1", 0.0),
+                        keystone_d2=tweaks.keystone_d2 + delta.get("keystone_d2", 0.0),
+                        paper_rotation_deg=tweaks.paper_rotation_deg + delta.get("paper_rotation_deg", 0.0),
+                        paper_scale=tweaks.paper_scale + delta.get("paper_scale", 0.0),
+                    ).clamp()
+                    tweak_changed = True
+                if key == ord("0"):
+                    tweaks = CalibrationTweaks()
+                    tweak_changed = True
+                if tweak_changed:
+                    tweaks_box[0] = tweaks
+                    save_tweaks(tweaks)
+                    print(
+                        f"Tweaks: scale={tweaks.scale_factor:.3f} "
+                        f"aspect={tweaks.aspect_ratio:.3f} "
+                        f"rot={tweaks.rotation_deg:+.1f}° "
+                        f"offset=({tweaks.offset_x_mm:+.1f},{tweaks.offset_y_mm:+.1f}) mm"
+                    )
 
             # Determine the requested next freeze state from either the 'n' key
             # or a pending HTTP request from the mobile app. HTTP wins if both
