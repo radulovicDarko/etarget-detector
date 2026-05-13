@@ -5,14 +5,24 @@ import time
 import cv2
 import numpy as np
 
-# Sound playback used to live here (pygame.mixer) but the mobile app now
-# owns shot/reset audio so it can be muted per-user via Settings → Sound
-# and so users without speakers on the Pi still get audio feedback.
-# Kept as a no-op for backward compatibility with existing call sites.
-def play_shoot():
-    return
+try:
+    import pygame
+    pygame.mixer.init()
+    _SHOOT_SOUND = pygame.mixer.Sound(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "assets", "Raspberry_Shot.wav"))
+    _SHOOT_CHANNEL = pygame.mixer.Channel(0)
+except Exception as e:
+    print(f"Sound disabled: {e}")
+    _SHOOT_SOUND = None
+    _SHOOT_CHANNEL = None
 
-import config
+
+def play_shoot():
+    if _SHOOT_SOUND is None or _SHOOT_CHANNEL is None:
+        return
+    _SHOOT_CHANNEL.stop()
+    _SHOOT_CHANNEL.play(_SHOOT_SOUND)
+
 from config import (
     RTSP_URL,
     WINDOW_NAME,
@@ -26,8 +36,6 @@ from config import (
     UPPER_RED_1,
     LOWER_RED_2,
     UPPER_RED_2,
-    LOWER_PURPLE,
-    UPPER_PURPLE,
     MIN_AREA,
     MAX_AREA,
     SHOT_COOLDOWN_MS,
@@ -53,11 +61,9 @@ from config import (
     AUTH_TOKEN,
     APP_VERSION,
     MJPEG_QUALITY,
-    is_headless,
 )
 
-from core.camera import create_camera_stream
-from core.ffmpeg_stream import FFmpegStream  # noqa: F401  (kept for type hints / external imports)
+from core.ffmpeg_stream import FFmpegStream
 from core.utils import FPSTimer, resize_to_fit
 from core.detector import LaserDetector
 from core.unity_sender import UnitySender
@@ -498,29 +504,22 @@ def project_paper_circle(h_paper_to_image, cx_mm, cy_mm, r_mm, n=96):
 
 
 def main():
-    # Pick the camera backend (PiCam on a Pi, FFmpeg/RTSP on a Mac dev box,
-    # or whatever was forced via SHOOTERRANGE_CAMERA_BACKEND). All three
-    # share the same open()/read()/release() interface so the rest of the
-    # pipeline stays identical.
-    stream = create_camera_stream(config)
+    stream = FFmpegStream(
+        ffmpeg_path=FFMPEG_PATH,
+        rtsp_url=RTSP_URL,
+        transport=RTSP_TRANSPORT,
+        scale=JPEG_SCALE
+    )
 
     if not stream.open():
-        print("Camera stream failed to open.")
+        print("Ne mogu da otvorim FFmpeg JPEG stream.")
         return
-
-    # Headless mode = no cv2 windows. On a Pi running as a service we still
-    # want the detector loop, the control server, and the MJPEG preview to
-    # work — only the local debug windows are skipped.
-    headless = is_headless()
-    print(f"[app] headless={headless} (gui={'off' if headless else 'on'})")
 
     detector = LaserDetector(
         lower_red_1=LOWER_RED_1,
         upper_red_1=UPPER_RED_1,
         lower_red_2=LOWER_RED_2,
         upper_red_2=UPPER_RED_2,
-        lower_extra=LOWER_PURPLE,
-        upper_extra=UPPER_PURPLE,
         min_area=MIN_AREA,
         max_area=MAX_AREA,
         shot_cooldown_ms=SHOT_COOLDOWN_MS,
@@ -531,8 +530,6 @@ def main():
         upper_red_1=UPPER_RED_1,
         lower_red_2=LOWER_RED_2,
         upper_red_2=UPPER_RED_2,
-        lower_extra=LOWER_PURPLE,
-        upper_extra=UPPER_PURPLE,
         min_area=MIN_AREA,
         max_area=MAX_AREA,
         shot_cooldown_ms=SHOT_COOLDOWN_MS,
@@ -583,9 +580,9 @@ def main():
     _auto_samples: list[tuple] = []
     _auto_samples_target: int = 0
 
-    if not headless:
-        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
-        cv2.namedWindow("Laser Mask", cv2.WINDOW_AUTOSIZE)
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
+
+    cv2.namedWindow("Laser Mask", cv2.WINDOW_AUTOSIZE)
 
     # Mobile control server (HTTP API + MJPEG preview).
     control_state = None
@@ -1201,17 +1198,11 @@ def main():
             display_frame = resize_to_fit(frame, DISPLAY_MAX_WIDTH, DISPLAY_MAX_HEIGHT)
             display_mask = resize_to_fit(mask, 600, 400)
 
-            if not headless:
-                cv2.imshow(WINDOW_NAME, display_frame)
-                cv2.imshow("Laser Mask", display_mask)
+            cv2.imshow(WINDOW_NAME, display_frame)
+            cv2.imshow("Laser Mask", display_mask)
 
-            # Push the annotated frame to the mobile preview stream — but
-            # ONLY when somebody is actually watching. JPEG encoding eats
-            # ~3-8 ms per frame on Pi 5, which translates directly to fewer
-            # missed laser pulses during live shooting. The `preview_wanted()`
-            # check returns True while the calibration screen is polling
-            # snapshots (with grace window) or an MJPEG stream is open.
-            if control_state is not None and control_state.preview_wanted():
+            # Push the annotated frame to the mobile preview stream.
+            if control_state is not None:
                 ok_jpg, jpg_buf = cv2.imencode(
                     ".jpg",
                     display_frame,
@@ -1220,15 +1211,7 @@ def main():
                 if ok_jpg:
                     control_state.push_frame(jpg_buf.tobytes())
 
-            # In headless mode there is no GUI event pump and no key input.
-            # The control server's HTTP requests still drive freeze/tweaks,
-            # and a tiny sleep keeps CPU sane when the camera is faster than
-            # the detector pipeline.
-            if headless:
-                time.sleep(0.001)
-                key = 0xFF
-            else:
-                key = cv2.waitKey(1) & 0xFF
+            key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
             if key == ord("r"):
@@ -1343,8 +1326,7 @@ def main():
         if unity_sender is not None:
             unity_sender.close()
         stream.release()
-        if not headless:
-            cv2.destroyAllWindows()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
