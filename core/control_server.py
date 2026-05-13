@@ -249,7 +249,9 @@ class ControlState:
                     token = self._ws_token
                     self._ws_peer = peer
                     self._ws_last_seen = now
+                    print(f"[ws] takeover peer={peer} client_id={client_id} token={token}")
                     return token
+                print(f"[ws] deny already_attached peer={peer} client_id={client_id} attached_peer={self._ws_peer}")
                 return None
             self._ws_token += 1
             token = self._ws_token
@@ -257,6 +259,7 @@ class ControlState:
             self._ws_peer = peer
             self._ws_client_id = client_id
             self._ws_last_seen = now
+            print(f"[ws] attach peer={peer} client_id={client_id} token={token}")
             return token
 
     def ws_token(self) -> int:
